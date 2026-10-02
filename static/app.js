@@ -942,8 +942,8 @@ const transitionState = {
   resultKey: "",    // 结果产生时的输入指纹
   _idSig: "",
   _bestSse: null,   // 最近一次求解的最优总误差（用于默认上限与提示）
-  inflightId: 0,        // 最近一次规划请求序号；0 表示当前无在途请求
-  inflightSig: "",      // 最近一次规划请求发出时的输入指纹
+  inflightId: 0,        // 已发出的规划请求计数：单调递增，完成 / 作废后也不归零（避免序号复用使旧响应冒认为新请求）
+  inflightSig: "",      // 仍在等待落地的最近一次请求发出时的输入指纹；"" 表示当前无生效中的在途请求（尚未发起，或已因输入变化作废）
 };
 
 const elTransitionOrder = $("#transitionOrder");
@@ -1074,10 +1074,9 @@ function resetTransitionOrder() {
 
 function markTransitionStaleness() {
   // 输入指纹变化时：在途请求（及其响应）立即失效，不能再改动结果 / 错误 / 加载状态。
-  // 这里仅结束加载态；旧响应返回后会在响应守卫处被丢弃。
-  if (transitionState.inflightId !== 0 &&
+  // 这里仅结束加载态；inflightId 保留不复用，旧响应返回后会在响应守卫处被丢弃。
+  if (transitionState.inflightSig !== "" &&
       transitionSignature() !== transitionState.inflightSig) {
-    transitionState.inflightId = 0;
     transitionState.inflightSig = "";
     elTransitionStatus.textContent = "";
     elTransitionStatus.className = "status";
@@ -1102,6 +1101,8 @@ function transitionResultFresh() {
 
 // 响应守卫：只有「最近一次请求」且「发出后参与输入未再变化」的响应可以落地，
 // 较早或已失效请求的成功 / HTTP 错误 / 连接异常一律忽略，不得触碰当前结果、错误提示或加载状态。
+// inflightId 单调递增、完成后不归零，因此即使较新请求已结束（成功 / HTTP 错误 / 连接异常），
+// 更早请求的迟到响应也绝不会取得当前请求身份。
 function transitionResponseCurrent(reqId, reqSig) {
   return (
     transitionState.inflightId === reqId &&
@@ -1119,8 +1120,8 @@ async function runTransition() {
     currentOrder: transitionState.order,
     transitionLimit: limit,
   };
-  // 记录本次请求序号与发出时的输入指纹；连续规划或输入变化时，
-  // 旧请求即便后返回也不会覆盖较新结果（见 transitionResponseCurrent）。
+  // 记录本次请求序号与发出时的输入指纹；序号只增不减、永不复用，
+  // 连续规划（含较新请求已先结束的情况）或输入变化时，旧请求即便后返回也不会覆盖较新结果。
   const reqId = ++transitionState.inflightId;
   const reqSig = transitionSignature();
   transitionState.inflightSig = reqSig;
@@ -1137,7 +1138,7 @@ async function runTransition() {
     });
     const data = await resp.json();
     if (!transitionResponseCurrent(reqId, reqSig)) return;
-    transitionState.inflightId = 0;
+    // 仅清掉「在途」标记；inflightId 保留，确保更早日序号的迟到响应不能再冒充当前请求
     transitionState.inflightSig = "";
     elTransitionStatus.textContent = "";
     elTransitionStatus.className = "status";
@@ -1150,7 +1151,6 @@ async function runTransition() {
     renderTransitionResult(data);
   } catch (err) {
     if (!transitionResponseCurrent(reqId, reqSig)) return;
-    transitionState.inflightId = 0;
     transitionState.inflightSig = "";
     elTransitionStatus.textContent = "";
     elTransitionStatus.className = "status";
