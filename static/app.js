@@ -942,8 +942,9 @@ const transitionState = {
   resultKey: "",    // 结果产生时的输入指纹
   _idSig: "",
   _bestSse: null,   // 最近一次求解的最优总误差（用于默认上限与提示）
-  inflightId: 0,        // 最近一次规划请求序号；0 表示当前无在途请求
-  inflightSig: "",      // 最近一次规划请求发出时的输入指纹
+  inflightId: 0,        // 当前仍可落地的在途请求序号；0 表示无（已完成 / 被更新请求取代 / 因输入变化作废）
+  inflightSig: "",      // 当前在途请求发出时的输入指纹
+  reqSeq: 0,            // 单调递增的请求序号源，永不归零，避免请求序号在完成后被新请求复用
 };
 
 const elTransitionOrder = $("#transitionOrder");
@@ -1074,7 +1075,8 @@ function resetTransitionOrder() {
 
 function markTransitionStaleness() {
   // 输入指纹变化时：在途请求（及其响应）立即失效，不能再改动结果 / 错误 / 加载状态。
-  // 这里仅结束加载态；旧响应返回后会在响应守卫处被丢弃。
+  // 这里仅结束加载态并作废在途请求；旧响应返回后会在响应守卫处被丢弃。
+  // 注意 reqSeq 不清零，请求序号始终单调递增，旧序号不会被后续请求复用。
   if (transitionState.inflightId !== 0 &&
       transitionSignature() !== transitionState.inflightSig) {
     transitionState.inflightId = 0;
@@ -1100,8 +1102,10 @@ function transitionResultFresh() {
   return transitionSignature() === transitionState.resultKey;
 }
 
-// 响应守卫：只有「最近一次请求」且「发出后参与输入未再变化」的响应可以落地，
-// 较早或已失效请求的成功 / HTTP 错误 / 连接异常一律忽略，不得触碰当前结果、错误提示或加载状态。
+// 响应守卫：只有「当前在途请求」且「发出后参与输入未再变化」的响应可以落地。
+// 请求序号取自永不归零的单调计数器，因此某请求完成（成功 / HTTP 错误 / 连接异常）
+// 不会释放其序号：输入不变时连续规划，较早请求即便后返回也无法冒充成新请求，
+// 其三种结局都只会被直接忽略，不触碰当前步骤、错误提示或加载状态。
 function transitionResponseCurrent(reqId, reqSig) {
   return (
     transitionState.inflightId === reqId &&
@@ -1119,9 +1123,10 @@ async function runTransition() {
     currentOrder: transitionState.order,
     transitionLimit: limit,
   };
-  // 记录本次请求序号与发出时的输入指纹；连续规划或输入变化时，
-  // 旧请求即便后返回也不会覆盖较新结果（见 transitionResponseCurrent）。
-  const reqId = ++transitionState.inflightId;
+  // 从永不归零的单调计数器取得本次请求序号，并登记为当前在途请求；
+  // 连续规划或输入变化时，旧请求即便后返回也不会覆盖较新结果（见 transitionResponseCurrent）。
+  const reqId = ++transitionState.reqSeq;
+  transitionState.inflightId = reqId;
   const reqSig = transitionSignature();
   transitionState.inflightSig = reqSig;
 
